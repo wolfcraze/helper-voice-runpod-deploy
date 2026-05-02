@@ -13,4 +13,6 @@ COPY start.sh /app/start.sh
 RUN chmod +x /app/start.sh
 
 # RunPod serverless container entrypoint
+# Override the ollama base image's ENTRYPOINT (which is ["/bin/ollama"]).
+ENTRYPOINT []
 CMD ["/app/start.sh"]
