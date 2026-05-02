@@ -1,10 +1,24 @@
 """
-RunPod serverless handler for helper-voice-v1.
-Receives chat-format requests, forwards to local Ollama, returns response.
-Compatible with Ollama /api/chat schema so Helper Mobile can use it directly.
+RunPod serverless handler for helper-voice-v1, with token-level streaming.
+
+Generator pattern: yields token deltas as Ollama produces them. RunPod aggregates
+yielded items into the /stream/{job_id} response so the shim can pick them up
+incrementally and re-emit Ollama-NDJSON chunks to Helper Mobile.
+
+Input formats accepted:
+    {"input": {"prompt": "...", "stream": true|false}}
+    {"input": {"messages": [{"role": "user", "content": "..."}], "stream": true|false}}
+    {"input": {"messages": [...], "options": {...}}}
+
+Yielded chunks (when streaming):
+    {"delta": "<token text>", "done": false}
+    ...
+    {"delta": "", "done": true, "eval_count": N, "total_duration": ns}
+
+Non-streaming returns final aggregate dict directly.
 """
-import os
 import json
+import os
 import requests
 import runpod
 
@@ -12,53 +26,73 @@ OLLAMA_URL = "http://127.0.0.1:11434"
 MODEL_NAME = "helper-voice-v1"
 
 
-def handler(event):
-    """RunPod serverless handler.
-
-    Expected input formats (any one):
-      {"input": {"prompt": "Helper weave."}}                        # simple
-      {"input": {"messages": [{"role":"user","content":"..."}]}}    # chat
-      {"input": {"messages": [...], "options": {...}}}              # full
-
-    Returns Ollama-style response dict.
-    """
-    inp = event.get("input", {})
-
-    # Normalize to messages format
+def _build_payload(inp):
     if "messages" in inp:
         messages = inp["messages"]
     elif "prompt" in inp:
         messages = [{"role": "user", "content": inp["prompt"]}]
     else:
-        return {"error": "input must contain 'messages' or 'prompt'"}
-
-    options = inp.get("options", {})
-
-    payload = {
+        return None, "input must contain 'messages' or 'prompt'"
+    return {
         "model": MODEL_NAME,
         "messages": messages,
-        "stream": False,
-        "options": options,
-    }
+        "stream": True,  # always stream from Ollama; we control aggregation
+        "options": inp.get("options", {}),
+    }, None
+
+
+def handler(event):
+    """Generator handler. Yields Ollama-token deltas. Caller decides streaming vs aggregate."""
+    inp = event.get("input", {}) or {}
+    payload, err = _build_payload(inp)
+    if err:
+        yield {"error": err, "done": True}
+        return
 
     try:
-        resp = requests.post(
+        with requests.post(
             f"{OLLAMA_URL}/api/chat",
             json=payload,
-            timeout=300,
-        )
-        resp.raise_for_status()
-        data = resp.json()
-        return {
-            "message": data.get("message", {}),
-            "model": data.get("model", MODEL_NAME),
-            "done": data.get("done", True),
-            "total_duration_ns": data.get("total_duration"),
-            "eval_count": data.get("eval_count"),
-        }
+            stream=True,
+            timeout=600,
+        ) as resp:
+            resp.raise_for_status()
+            content_acc = []
+            eval_count = 0
+            total_duration = 0
+            for raw_line in resp.iter_lines():
+                if not raw_line:
+                    continue
+                try:
+                    chunk = json.loads(raw_line)
+                except json.JSONDecodeError:
+                    continue
+                msg = chunk.get("message", {}) or {}
+                delta = msg.get("content", "")
+                done = bool(chunk.get("done", False))
+                if delta:
+                    content_acc.append(delta)
+                    yield {"delta": delta, "done": False}
+                if done:
+                    eval_count = chunk.get("eval_count", 0)
+                    total_duration = chunk.get("total_duration", 0)
+                    yield {
+                        "delta": "",
+                        "done": True,
+                        "eval_count": eval_count,
+                        "total_duration": total_duration,
+                        "full_text": "".join(content_acc),
+                    }
+                    return
     except requests.exceptions.RequestException as e:
-        return {"error": f"ollama request failed: {e}"}
+        yield {"error": f"ollama request failed: {e}", "done": True}
 
 
 if __name__ == "__main__":
-    runpod.serverless.start({"handler": handler})
+    # return_aggregate_stream=True allows the shim to call /runsync and get the
+    # whole aggregate back as a list, OR call /run + /stream/{id} to get
+    # incremental chunks.
+    runpod.serverless.start({
+        "handler": handler,
+        "return_aggregate_stream": True,
+    })
