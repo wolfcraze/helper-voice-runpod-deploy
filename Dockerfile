@@ -13,14 +13,10 @@ COPY handler.py /app/handler.py
 COPY start.sh /app/start.sh
 RUN chmod +x /app/start.sh
 
-# Bake the GGUF into the image at build time. Pulls from the private HF repo
-# using the HF_TOKEN secret mounted only during this RUN step (not in any layer).
-# Result: cold-starts skip the 19GB HF download. RunPod caches the image per
-# physical worker, so subsequent cold starts on a hot machine are 6-12s.
-COPY download_gguf.py /app/download_gguf.py
-RUN --mount=type=secret,id=HF_TOKEN \
-    HF_TOKEN=$(cat /run/secrets/HF_TOKEN) python3 /app/download_gguf.py && \
-    ls -lah /models/
+# NOTE: We tried baking the 19GB GGUF into the image, but RunPod workers
+# couldn't reliably spin up with a 22GB image (throttle storms, slow pulls).
+# Reverted to small-image + HF-download-on-cold-start (start.sh handles it).
+# The download takes ~2-3 min on cold start but workers actually spawn.
 
 # RunPod serverless container entrypoint
 # Override the ollama base image's ENTRYPOINT (which is ["/bin/ollama"]).
