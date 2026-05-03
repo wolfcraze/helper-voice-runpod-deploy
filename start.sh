@@ -21,20 +21,21 @@ until curl -s http://127.0.0.1:11434/api/tags > /dev/null 2>&1; do
 done
 echo "[start] ollama ready"
 
-# GGUF location: prefer Network Volume (persistent across cold starts) if mounted.
-# Falls back to ephemeral container disk if no volume (also useful for local testing).
-if [ -d /runpod-volume ]; then
+# GGUF location strategy:
+# 1. Network volume at /runpod-volume/models — persistent if endpoint has volume mounted
+# 2. Image-baked /models/ — always present (we bake during Docker build)
+# This way the runtime works whether or not a volume is attached.
+if [ -d /runpod-volume ] && [ -f /runpod-volume/models/helper-voice-v1.Q5_K_M.gguf ]; then
     MODEL_DIR=/runpod-volume/models
-    echo "[start] using network volume at $MODEL_DIR (persistent — fast subsequent cold starts)"
-else
+    echo "[start] using network volume at $MODEL_DIR"
+elif [ -f /models/helper-voice-v1.Q5_K_M.gguf ]; then
     MODEL_DIR=/models
-    echo "[start] using ephemeral container disk at $MODEL_DIR (will re-download every cold start)"
-fi
-mkdir -p "$MODEL_DIR"
-GGUF_PATH=$MODEL_DIR/helper-voice-v1.Q5_K_M.gguf
-
-if [ ! -f "$GGUF_PATH" ] || [ "$(stat -c%s "$GGUF_PATH" 2>/dev/null)" -lt 19000000000 ]; then
-    echo "[start] downloading helper-voice-v1 GGUF from HF (one-time on volume init)"
+    echo "[start] using image-baked GGUF at $MODEL_DIR"
+else
+    # Last-resort fallback (shouldn't normally happen — image should have GGUF baked)
+    MODEL_DIR=/models
+    mkdir -p "$MODEL_DIR"
+    echo "[start] WARN: GGUF not present, downloading from HF (slow path)"
     python3 -c "
 from huggingface_hub import hf_hub_download
 import os
@@ -46,9 +47,9 @@ hf_hub_download(
 )
 print('[hf-download] complete')
 "
-else
-    echo "[start] GGUF already present at $GGUF_PATH ($(du -h $GGUF_PATH | cut -f1)) — skipping download"
 fi
+GGUF_PATH=$MODEL_DIR/helper-voice-v1.Q5_K_M.gguf
+echo "[start] GGUF: $GGUF_PATH ($(du -h $GGUF_PATH | cut -f1))"
 
 # Build a per-worker Modelfile that points at the actual GGUF location
 sed "s|FROM /models/helper-voice-v1.Q5_K_M.gguf|FROM $GGUF_PATH|" /app/Modelfile > /tmp/Modelfile.runtime

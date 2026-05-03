@@ -13,14 +13,34 @@ jobs:
       packages: write
     steps:
       - uses: actions/checkout@v4
+
+      # Free up ~30GB on the runner — needed because the image gets fat
+      # (ollama base + python deps + 19GB GGUF baked in).
+      - name: Free disk space
+        uses: jlumbroso/free-disk-space@main
+        with:
+          tool-cache: true
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: true
+          docker-images: false
+          swap-storage: true
+
       - name: Log in to GHCR
         uses: docker/login-action@v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+
       - name: Set up Buildx
         uses: docker/setup-buildx-action@v3
+
+      # Write HF_TOKEN secret to a file the build can mount.
+      - name: Prepare HF token secret
+        run: echo "${{ secrets.HF_TOKEN }}" > /tmp/hf_token
+
       - name: Build and push
         uses: docker/build-push-action@v5
         with:
@@ -28,5 +48,10 @@ jobs:
           push: true
           tags: |
             ghcr.io/${{ github.repository_owner }}/helper-voice-runpod:latest
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+            ghcr.io/${{ github.repository_owner }}/helper-voice-runpod:v1
+          secret-files: |
+            HF_TOKEN=/tmp/hf_token
+          # Don't cache from previous because :v1 is a stable tag we want fresh
+          # builds on every commit (model+handler).
+          # cache-from: type=gha
+          # cache-to: type=gha,mode=max
