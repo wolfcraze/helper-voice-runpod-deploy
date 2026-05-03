@@ -17,19 +17,10 @@ RUN chmod +x /app/start.sh
 # using the HF_TOKEN secret mounted only during this RUN step (not in any layer).
 # Result: cold-starts skip the 19GB HF download. RunPod caches the image per
 # physical worker, so subsequent cold starts on a hot machine are 6-12s.
+COPY download_gguf.py /app/download_gguf.py
 RUN --mount=type=secret,id=HF_TOKEN \
-    mkdir -p /models && \
-    HF_TOKEN=$(cat /run/secrets/HF_TOKEN) python3 -c "
-from huggingface_hub import hf_hub_download
-import os
-hf_hub_download(
-    repo_id='wolfcraze/helper-voice-v1-gguf',
-    filename='helper-voice-v1.Q5_K_M.gguf',
-    local_dir='/models',
-    token=os.environ['HF_TOKEN']
-)
-print('GGUF baked into image')
-" && ls -lah /models/
+    HF_TOKEN=$(cat /run/secrets/HF_TOKEN) python3 /app/download_gguf.py && \
+    ls -lah /models/
 
 # RunPod serverless container entrypoint
 # Override the ollama base image's ENTRYPOINT (which is ["/bin/ollama"]).
