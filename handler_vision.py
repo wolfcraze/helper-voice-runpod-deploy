@@ -25,6 +25,7 @@ def handler(event):
     np = opts.get("num_predict")
     if isinstance(np, int) and np > 0: payload["max_tokens"] = np
     if inp.get("tools"): payload["tools"] = inp["tools"]
+    payload["chat_template_kwargs"] = {"enable_thinking": False}  # Qwen3.6: answer in content, not <think>
     try:
         with requests.post(f"{LLAMA_URL}/v1/chat/completions", json=payload, stream=True, timeout=600) as resp:
             resp.raise_for_status(); acc=[]
@@ -37,7 +38,8 @@ def handler(event):
                     yield {"delta":"","done":True,"full_text":"".join(acc)}; return
                 try: chunk = json.loads(data)
                 except json.JSONDecodeError: continue
-                delta = (chunk.get("choices") or [{}])[0].get("delta",{}).get("content","")
+                _d = (chunk.get("choices") or [{}])[0].get("delta",{})
+                delta = _d.get("content","") or _d.get("reasoning_content","")
                 if delta: acc.append(delta); yield {"delta": delta, "done": False}
             yield {"delta":"","done":True,"full_text":"".join(acc)}
     except requests.exceptions.RequestException as e:
