@@ -56,22 +56,28 @@ def handler(event):
     if isinstance(np, int) and np > 0: payload["max_tokens"] = np
     if inp.get("tools"): payload["tools"] = inp["tools"]
     payload["chat_template_kwargs"] = {"enable_thinking": False}  # Qwen3.6: answer in content, not <think>
+    payload["stream_options"] = {"include_usage": True}  # token counts in final chunk -> RC metering
     try:
         with requests.post(f"{LLAMA_URL}/v1/chat/completions", json=payload, stream=True, timeout=600) as resp:
-            resp.raise_for_status(); acc=[]
+            resp.raise_for_status(); acc=[]; usage={}
+            def _final():
+                return {"delta":"","done":True,"full_text":"".join(acc),
+                        "prompt_eval_count": usage.get("prompt_tokens",0),
+                        "eval_count": usage.get("completion_tokens",0)}
             for raw in resp.iter_lines():
                 if not raw: continue
                 line = raw.decode("utf-8","ignore")
                 if not line.startswith("data: "): continue
                 data = line[6:]
                 if data.strip() == "[DONE]":
-                    yield {"delta":"","done":True,"full_text":"".join(acc)}; return
+                    yield _final(); return
                 try: chunk = json.loads(data)
                 except json.JSONDecodeError: continue
+                if chunk.get("usage"): usage = chunk["usage"]
                 _d = (chunk.get("choices") or [{}])[0].get("delta",{})
                 delta = _d.get("content","") or _d.get("reasoning_content","")
                 if delta: acc.append(delta); yield {"delta": delta, "done": False}
-            yield {"delta":"","done":True,"full_text":"".join(acc)}
+            yield _final()
     except requests.exceptions.RequestException as e:
         yield {"error": f"llama-server request failed: {e}", "done": True}
 
