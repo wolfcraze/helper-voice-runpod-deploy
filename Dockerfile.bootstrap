@@ -1,0 +1,11 @@
+FROM ollama/ollama:latest
+RUN apt-get update && apt-get install -y python3 python3-pip curl && rm -rf /var/lib/apt/lists/*
+RUN pip install --no-cache-dir --break-system-packages runpod requests huggingface_hub hf_transfer
+WORKDIR /app
+COPY Modelfile /app/Modelfile
+COPY Modelfile.helper-voice-v2 /app/Modelfile.helper-voice-v2
+COPY handler_bootstrap.py /app/handler_bootstrap.py
+COPY start_bootstrap.sh /app/start_bootstrap.sh
+RUN chmod +x /app/start_bootstrap.sh
+ENTRYPOINT []
+CMD ["/app/start_bootstrap.sh"]
