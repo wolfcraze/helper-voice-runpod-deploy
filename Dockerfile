@@ -7,8 +7,9 @@ RUN pip install --no-cache-dir --break-system-packages runpod requests huggingfa
 
 WORKDIR /app
 
-# Bake handler + Modelfile
+# Bake handler + Modelfiles (v1 default + per-model variants)
 COPY Modelfile /app/Modelfile
+COPY Modelfile.helper-voice-v2 /app/Modelfile.helper-voice-v2
 COPY handler.py /app/handler.py
 COPY start.sh /app/start.sh
 RUN chmod +x /app/start.sh

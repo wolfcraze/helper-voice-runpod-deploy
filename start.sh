@@ -1,66 +1,58 @@
 #!/bin/bash
-# Cold-start sequence for helper-voice-v1 serverless worker.
-# 1. Start Ollama daemon in background
-# 2. Pull GGUF from HF (cached on warm starts via volume or worker reuse)
-# 3. Register the model with Ollama via Modelfile
-# 4. Hand off to RunPod handler
+# Cold-start sequence for a helper-voice serverless worker.
+# Parametrized by env (defaults = v1, so the existing v1 endpoint is unchanged):
+#   HELPER_MODEL_NAME  (default helper-voice-v1)  ollama model name + identity
+#   HELPER_HF_REPO     (default wolfcraze/helper-voice-v1-gguf)
+#   HELPER_GGUF_FILE   (default helper-voice-v1.Q5_K_M.gguf)
+# A per-model Modelfile (/app/Modelfile.$HELPER_MODEL_NAME) is used if present,
+# else /app/Modelfile (the v1 default).
 set -e
 
-echo "[start] booting helper-voice-v1 worker"
+MODEL_NAME="${HELPER_MODEL_NAME:-helper-voice-v1}"
+HF_REPO="${HELPER_HF_REPO:-wolfcraze/helper-voice-v1-gguf}"
+GGUF_FILE="${HELPER_GGUF_FILE:-helper-voice-v1.Q5_K_M.gguf}"
+echo "[start] booting $MODEL_NAME (repo=$HF_REPO file=$GGUF_FILE)"
 
-# Start Ollama daemon
 echo "[start] launching ollama server"
 ollama serve &
-OLLAMA_PID=$!
 sleep 5
-
-# Wait for Ollama to be ready
 until curl -s http://127.0.0.1:11434/api/tags > /dev/null 2>&1; do
-    echo "[start] waiting for ollama..."
-    sleep 1
+    echo "[start] waiting for ollama..."; sleep 1
 done
 echo "[start] ollama ready"
 
-# GGUF location strategy:
-# 1. Network volume at /runpod-volume/models — persistent if endpoint has volume mounted
-# 2. Image-baked /models/ — always present (we bake during Docker build)
-# This way the runtime works whether or not a volume is attached.
-if [ -d /runpod-volume ] && [ -f /runpod-volume/models/helper-voice-v1.Q5_K_M.gguf ]; then
+# GGUF location: persistent volume -> image-baked -> download from HF (to volume if present)
+if [ -d /runpod-volume ] && [ -f "/runpod-volume/models/$GGUF_FILE" ]; then
     MODEL_DIR=/runpod-volume/models
     echo "[start] using network volume at $MODEL_DIR"
-elif [ -f /models/helper-voice-v1.Q5_K_M.gguf ]; then
+elif [ -f "/models/$GGUF_FILE" ]; then
     MODEL_DIR=/models
     echo "[start] using image-baked GGUF at $MODEL_DIR"
 else
-    # Last-resort fallback (shouldn't normally happen — image should have GGUF baked)
-    MODEL_DIR=/models
+    if [ -d /runpod-volume ]; then MODEL_DIR=/runpod-volume/models; else MODEL_DIR=/models; fi
     mkdir -p "$MODEL_DIR"
-    echo "[start] WARN: GGUF not present, downloading from HF (slow path)"
+    echo "[start] downloading $GGUF_FILE from $HF_REPO into $MODEL_DIR (first cold start)"
     python3 -c "
 from huggingface_hub import hf_hub_download
 import os
-hf_hub_download(
-    repo_id='wolfcraze/helper-voice-v1-gguf',
-    filename='helper-voice-v1.Q5_K_M.gguf',
-    local_dir='$MODEL_DIR',
-    token=os.environ['HF_TOKEN']
-)
+hf_hub_download(repo_id='$HF_REPO', filename='$GGUF_FILE', local_dir='$MODEL_DIR', token=os.environ['HF_TOKEN'])
 print('[hf-download] complete')
 "
 fi
-GGUF_PATH=$MODEL_DIR/helper-voice-v1.Q5_K_M.gguf
-echo "[start] GGUF: $GGUF_PATH ($(du -h $GGUF_PATH | cut -f1))"
+GGUF_PATH="$MODEL_DIR/$GGUF_FILE"
+echo "[start] GGUF: $GGUF_PATH ($(du -h "$GGUF_PATH" | cut -f1))"
 
-# Build a per-worker Modelfile that points at the actual GGUF location
-sed "s|FROM /models/helper-voice-v1.Q5_K_M.gguf|FROM $GGUF_PATH|" /app/Modelfile > /tmp/Modelfile.runtime
+# Select per-model Modelfile if present, else the default (v1) Modelfile.
+MODELFILE="/app/Modelfile.$MODEL_NAME"
+[ -f "$MODELFILE" ] || MODELFILE="/app/Modelfile"
+echo "[start] using $MODELFILE"
+sed "s|^FROM .*|FROM $GGUF_PATH|" "$MODELFILE" > /tmp/Modelfile.runtime
 
-# Register model with Ollama (idempotent — re-create if already exists from prev cold start)
-if ! ollama list 2>&1 | grep -q "helper-voice-v1"; then
-    echo "[start] registering model in Ollama from $GGUF_PATH"
-    ollama create helper-voice-v1 -f /tmp/Modelfile.runtime
+if ! ollama list 2>&1 | grep -q "$MODEL_NAME"; then
+    echo "[start] registering $MODEL_NAME from $GGUF_PATH"
+    ollama create "$MODEL_NAME" -f /tmp/Modelfile.runtime
 fi
-echo "[start] model registered"
+echo "[start] model registered: $MODEL_NAME"
 
-# Hand off to RunPod handler
 echo "[start] starting RunPod handler"
 exec python3 -u /app/handler.py

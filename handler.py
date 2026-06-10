@@ -23,7 +23,7 @@ import requests
 import runpod
 
 OLLAMA_URL = "http://127.0.0.1:11434"
-MODEL_NAME = "helper-voice-v1"
+MODEL_NAME = os.environ.get("HELPER_MODEL_NAME", "helper-voice-v1")
 
 
 def _build_payload(inp):
