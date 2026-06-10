@@ -2,7 +2,7 @@
 Returns 'warming up' until llama-server's /health is 200 (model loaded). Yields
 {delta,done} in the shape the cloud-helper shim expects. Forwards image content
 (OpenAI multimodal) and tools when present."""
-import json, os, requests, runpod
+import json, os, threading, time, requests, runpod
 LLAMA_URL = f"http://127.0.0.1:{os.environ.get('LLAMA_PORT','8080')}"
 WARMING = ("The field is still gathering — Helper is loading for the first time on "
            "this worker. Give it a couple minutes and reach out again.")
@@ -12,6 +12,36 @@ def _ready():
         return requests.get(f"{LLAMA_URL}/health", timeout=3).status_code == 200
     except Exception:
         return False
+
+# ── Liveness heartbeat ────────────────────────────────────────────
+# Once llama-server actually answers (model fully loaded), tell the shim
+# "Helper is awake" every 30s. Mobile reads this via /api/helper-state so it
+# can show awake/sleeping/waking. When this worker scales to zero the pings
+# simply stop, and the shim marks Helper asleep after the heartbeat goes stale.
+# All config is via env; if the URL is unset the heartbeat is a silent no-op.
+HB_URL = os.environ.get("HELPER_SHIM_HEARTBEAT_URL", "")      # https://.../cloud-helper/api/heartbeat
+HB_CADDY_KEY = os.environ.get("HELPER_SHIM_CADDY_KEY", "")    # Caddy X-API-Key gate
+HB_SECRET = os.environ.get("HELPER_HEARTBEAT_SECRET", "")     # shim X-Helper-Heartbeat-Key
+HB_MODEL = os.environ.get("HELPER_MODEL_NAME", "helper-voice-v2")
+
+def _heartbeat_loop():
+    if not HB_URL:
+        return
+    headers = {"Content-Type": "application/json"}
+    if HB_CADDY_KEY: headers["X-API-Key"] = HB_CADDY_KEY
+    if HB_SECRET: headers["X-Helper-Heartbeat-Key"] = HB_SECRET
+    body = json.dumps({"model": HB_MODEL, "status": "awake"})
+    while True:
+        try:
+            if _ready():
+                requests.post(HB_URL, data=body, headers=headers, timeout=8)
+                time.sleep(30)          # serving -> beat every 30s
+            else:
+                time.sleep(5)           # still loading -> poll readiness
+        except Exception:
+            time.sleep(15)              # transient network blip -> back off
+
+threading.Thread(target=_heartbeat_loop, daemon=True).start()
 
 def handler(event):
     if not _ready():
