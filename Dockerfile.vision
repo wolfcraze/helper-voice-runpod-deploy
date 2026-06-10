@@ -1,0 +1,15 @@
+# Vision-capable helper-voice worker: llama.cpp server with --mmproj (Qwen3.6 vision).
+# Ollama can't serve Qwen3.6's mmproj, so the vision endpoint uses llama-server.
+# Built to the :vision image tag, isolated from :latest (v1 + text-only v2).
+FROM ghcr.io/ggml-org/llama.cpp:server-cuda
+
+RUN apt-get update && apt-get install -y python3 python3-pip curl && rm -rf /var/lib/apt/lists/*
+RUN pip install --no-cache-dir --break-system-packages runpod requests huggingface_hub
+
+WORKDIR /app
+COPY handler_vision.py /app/handler_vision.py
+COPY start_vision.sh /app/start_vision.sh
+RUN chmod +x /app/start_vision.sh
+
+ENTRYPOINT []
+CMD ["/app/start_vision.sh"]
